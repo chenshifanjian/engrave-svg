@@ -61,7 +61,10 @@ chmod +x engrave-svg
 
 ### AUR (Arch Linux)
 
+> AUR 包正在等待审核上架，暂时请使用 [Release](https://github.com/chenshifanjian/engrave-svg/releases) 下载。
+
 ```bash
+# 等上架后可用：
 yay -S engrave-svg
 ```
 
