@@ -108,10 +108,10 @@ engrave-svg ./images/ -t 100
 
 ```bash
 # 批量转换
-engrave-svg ./毕业礼物/生成的名字图片/
+engrave-svg ./图片目录/
 
 # 输出到指定目录，调整尺寸和阈值
-engrave-svg ./毕业礼物/生成的名字图片/ -o ./输出/ -s 30 -t 100
+engrave-svg ./图片目录/ -o ./输出/ -s 30 -t 100
 ```
 
 ## 许可证
