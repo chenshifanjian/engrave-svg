@@ -1,0 +1,636 @@
+#!/usr/bin/env python3
+"""
+engrave-svg - 图片转激光雕刻矢量工具 (EZCad 兼容)
+
+用法:
+    engrave-svg                          # 打开图形界面
+    engrave-svg <输入目录或文件> [选项]    # 命令行模式
+
+选项:
+    -o, --output <目录>    输出目录 (默认: 输入目录名_svg)
+    -s, --size <mm>        输出尺寸 (默认: 50mm)
+    -v, --version          显示版本
+"""
+
+import os
+import sys
+import shutil
+import subprocess
+import glob
+import tempfile
+import re
+
+__version__ = "1.2.1"
+
+SUPPORTED_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')
+
+
+def check_potrace():
+    return shutil.which("potrace") is not None
+
+
+def check_pillow():
+    try:
+        from PIL import Image
+        return True
+    except ImportError:
+        return False
+
+
+def png_to_svg(png_path, svg_path, size_mm=50, threshold=128):
+    from PIL import Image
+
+    pbm = None
+    try:
+        if not os.path.isfile(png_path):
+            raise FileNotFoundError(f"文件不存在: {png_path}")
+
+        with tempfile.NamedTemporaryFile(suffix=".pbm", delete=False) as tmp:
+            pbm = tmp.name
+
+        img = Image.open(png_path)
+
+        # 处理透明通道：将透明背景替换为白色
+        if img.mode == "RGBA":
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+
+        img = img.convert("L")
+        img = img.point(lambda x: 255 if x > threshold else 0, "1")
+        img.save(pbm)
+
+        result = subprocess.run(
+            ["potrace", "-s", "--unit", "1", "-o", svg_path, pbm],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"potrace 失败: {result.stderr}")
+
+        with open(svg_path, "r") as f:
+            content = f.read()
+        content = re.sub(r'width="[^"]*"', f'width="{size_mm}mm"', content)
+        content = re.sub(r'height="[^"]*"', f'height="{size_mm}mm"', content)
+        with open(svg_path, "w") as f:
+            f.write(content)
+    finally:
+        if pbm and os.path.exists(pbm):
+            os.unlink(pbm)
+
+
+def batch_convert(input_path, output_dir, size_mm, threshold=128):
+    if os.path.isfile(input_path):
+        if input_path.lower().endswith(SUPPORTED_EXTS):
+            files = [input_path]
+        else:
+            print(f"不支持的文件格式: {input_path}")
+            return 0, 1
+    elif os.path.isdir(input_path):
+        files = sorted(
+            f for f in glob.glob(os.path.join(input_path, "*"))
+                    if f.lower().endswith(SUPPORTED_EXTS)
+        )
+    else:
+        print(f"路径不存在: {input_path}")
+        return 0, 1
+
+    if not files:
+        print("未找到支持的图片文件")
+        return 0, 0
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"共 {len(files)} 个文件 -> {output_dir}")
+    ok = fail = 0
+
+    for idx, png in enumerate(files, 1):
+        name = os.path.splitext(os.path.basename(png))[0]
+        svg = os.path.join(output_dir, name + ".svg")
+        try:
+            png_to_svg(png, svg, size_mm, threshold)
+            ok += 1
+            print(f"[{idx}/{len(files)}] {name} ✓")
+        except Exception as e:
+            fail += 1
+            print(f"[{idx}/{len(files)}] {name} ✗ {e}")
+
+    print(f"\n完成: 成功 {ok}, 失败 {fail}")
+    return ok, fail
+
+
+def main_cli():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="engrave-svg - 图片转激光雕刻矢量工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  engrave-svg ./我的图片/              # 转换目录下所有图片
+  engrave-svg ./图片.png -s 30        # 单个文件，30mm 尺寸
+  engrave-svg ./images/ -o ./output/  # 指定输出目录
+  engrave-svg ./images/ -t 100        # 调整二值化阈值
+  engrave-svg -g                      # 打开图形界面
+        """
+    )
+    parser.add_argument("input", nargs="?", help="输入图片文件或目录 (不指定则打开 GUI)")
+    parser.add_argument("-o", "--output", help="输出目录 (默认: 输入目录名_svg)")
+    parser.add_argument("-s", "--size", type=float, default=50, help="输出尺寸 mm (默认: 50)")
+    parser.add_argument("-t", "--threshold", type=int, default=128, help="二值化阈值 0-255 (默认: 128)")
+    parser.add_argument("-g", "--gui", action="store_true", help="强制打开图形界面")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+
+    args = parser.parse_args()
+
+    if args.gui or args.input is None:
+        main_gui()
+        return
+
+    if args.output:
+        output_dir = args.output
+    else:
+        input_dir = args.input.rstrip("/")
+        if os.path.isdir(input_dir):
+            output_dir = input_dir + "_svg"
+        else:
+            output_dir = os.path.splitext(input_dir)[0] + "_svg"
+
+    batch_convert(args.input, output_dir, args.size, args.threshold)
+
+
+def main_gui():
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    missing = []
+    if not check_potrace():
+        missing.append("potrace")
+    if not check_pillow():
+        missing.append("python-pillow")
+
+    if missing:
+        root = tk.Tk()
+        root.withdraw()
+        pkg = " ".join("potrace" if p == "potrace" else "python-pillow" for p in missing)
+        messagebox.showerror("缺少依赖", f"未找到: {', '.join(missing)}\n\n安装命令:\n  sudo pacman -S {pkg}")
+        return
+
+    class FileDialog(tk.Toplevel):
+        """自定义文件/目录选择对话框，支持 HiDPI"""
+
+        def __init__(self, parent, title="选择", mode="dir", filetypes=None, initialdir=None, scale=1.0):
+            super().__init__(parent)
+            self.title(title)
+            self.result = None
+            self.mode = mode
+            self.filetypes = filetypes or []
+            self.scale = scale
+
+            self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+            s = self.scale
+            w, h = int(650 * s), int(500 * s)
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw - w) // 2
+            y = py + (ph - h) // 2
+            self.geometry(f"{w}x{h}+{x}+{y}")
+            self.minsize(int(400 * s), int(300 * s))
+
+            self.current_path = tk.StringVar(value=initialdir or os.path.expanduser("~"))
+            self.selected = tk.StringVar()
+
+            self._build_ui()
+            self.after(50, self._navigate, self.current_path.get())
+
+        def _build_ui(self):
+            s = self.scale
+            fs = max(10, int(11 * s))
+            pad = int(8 * s)
+
+            # 路径栏
+            frame_path = ttk.Frame(self)
+            frame_path.pack(fill="x", padx=pad, pady=pad)
+            ttk.Label(frame_path, text="路径:", font=("sans-serif", fs)).pack(side="left")
+            entry = ttk.Entry(frame_path, textvariable=self.current_path, font=("sans-serif", fs))
+            entry.pack(side="left", fill="x", expand=True, padx=pad)
+            entry.bind("<Return>", lambda e: self._navigate(self.current_path.get()))
+
+            # 文件列表
+            frame_list = ttk.Frame(self)
+            frame_list.pack(fill="both", expand=True, padx=pad, pady=(0, pad))
+
+            self.listbox = tk.Listbox(
+                frame_list,
+                font=("monospace", max(10, int(11 * s))),
+                activestyle="none"
+            )
+            scrollbar_y = ttk.Scrollbar(frame_list, orient="vertical", command=self.listbox.yview)
+            scrollbar_x = ttk.Scrollbar(frame_list, orient="horizontal", command=self.listbox.xview)
+            self.listbox.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+
+            self.listbox.pack(side="left", fill="both", expand=True)
+            scrollbar_y.pack(side="right", fill="y")
+            scrollbar_x.pack(side="bottom", fill="x")
+
+            self.listbox.bind("<Double-1>", lambda e: self._on_double_click())
+            self.listbox.bind("<<ListboxSelect>>", lambda e: self._on_select())
+
+            # 底部按钮
+            frame_btn = ttk.Frame(self)
+            frame_btn.pack(fill="x", padx=pad, pady=(0, pad))
+
+            if self.mode == "file" and self.filetypes:
+                self.type_var = tk.StringVar()
+                types = [f"{name} ({ext})" for name, ext in self.filetypes]
+                self.type_combo = ttk.Combobox(
+                    frame_btn, textvariable=self.type_var,
+                    values=types, state="readonly", font=("sans-serif", max(9, int(10 * s)))
+                )
+                self.type_combo.pack(side="left", fill="x", expand=True)
+                self.type_combo.current(0)
+                self.type_combo.bind("<<ComboboxSelected>>", lambda e: self._navigate(self.current_path.get()))
+
+            btn_frame = ttk.Frame(frame_btn)
+            btn_frame.pack(side="right")
+
+            ttk.Button(btn_frame, text="确定", command=self._confirm).pack(side="left", padx=pad // 2)
+            ttk.Button(btn_frame, text="取消", command=self._cancel).pack(side="left", padx=pad // 2)
+
+        def _navigate(self, path):
+            path = os.path.expanduser(path)
+            if not os.path.isdir(path):
+                return
+            self.current_path.set(path)
+            self.listbox.delete(0, "end")
+
+            # 上级目录
+            parent_dir = os.path.dirname(path)
+            if parent_dir != path:
+                self.listbox.insert("end", ".. (上级目录)")
+
+            try:
+                entries = sorted(os.listdir(path), key=lambda x: (not os.path.isdir(os.path.join(path, x)), x.lower()))
+            except PermissionError:
+                self.listbox.insert("end", " (无权限访问)")
+                return
+
+            for name in entries:
+                full = os.path.join(path, name)
+                try:
+                    is_dir = os.path.isdir(full)
+                except OSError:
+                    continue
+                if is_dir:
+                    self.listbox.insert("end", f" {name}/")
+                elif self.mode == "file":
+                    if self._match_filter(name):
+                        self.listbox.insert("end", f" {name}")
+
+        def _match_filter(self, name):
+            if not self.filetypes:
+                return True
+            idx = self.type_combo.current() if hasattr(self, "type_combo") else 0
+            if idx == 0:
+                return True
+            _, ext_pattern = self.filetypes[idx]
+            exts = ext_pattern.replace("*.", "").split()
+            return name.lower().endswith(tuple(f".{e}" for e in exts))
+
+        def _on_select(self):
+            sel = self.listbox.curselection()
+            if not sel:
+                return
+            text = self.listbox.get(sel[0])
+            name = text.strip().rstrip("/")
+            if name == ".. (上级目录)":
+                return
+            full = os.path.join(self.current_path.get(), name)
+            self.selected.set(full)
+
+        def _on_double_click(self):
+            sel = self.listbox.curselection()
+            if not sel:
+                return
+            text = self.listbox.get(sel[0])
+            name = text.strip().rstrip("/")
+
+            if name == ".. (上级目录)":
+                self._navigate(os.path.dirname(self.current_path.get()))
+                return
+
+            full = os.path.join(self.current_path.get(), name)
+            if os.path.isdir(full):
+                self._navigate(full)
+            elif self.mode == "file":
+                self.result = full
+                self.destroy()
+
+        def _confirm(self):
+            if self.mode == "dir":
+                self.result = self.current_path.get()
+            else:
+                sel = self.listbox.curselection()
+                if sel:
+                    text = self.listbox.get(sel[0]).strip().rstrip("/")
+                    if text and text != ".. (上级目录)":
+                        full = os.path.join(self.current_path.get(), text)
+                        if os.path.isfile(full):
+                            self.result = full
+            self.destroy()
+
+        def _cancel(self):
+            self.result = None
+            self.destroy()
+
+    class EngraveSvgApp:
+        def __init__(self, root):
+            self.root = root
+            self.root.title("engrave-svg - 图片转激光雕刻矢量工具")
+
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            self.scale = min(sw / 1920, sh / 1080)
+            self.scale = max(1.0, min(self.scale, 3.0))
+
+            w, h = int(800 * self.scale), int(600 * self.scale)
+            x, y = (sw - w) // 2, (sh - h) // 2
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+            self.root.minsize(int(600 * self.scale), int(450 * self.scale))
+
+            self.input_path = tk.StringVar()
+            self.output_dir = tk.StringVar()
+            self.size_mm = tk.IntVar(value=50)
+            self.threshold = tk.IntVar(value=128)
+            self.status = tk.StringVar(value="就绪")
+            self.is_single_file = False
+
+            self._setup_theme()
+            self.create_ui()
+
+        def _setup_theme(self):
+            style = ttk.Style()
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+
+            s = self.scale
+            style.configure(".", font=("sans-serif", max(10, int(11 * s))))
+            style.configure("TLabel", font=("sans-serif", max(10, int(11 * s))))
+            style.configure("TButton", font=("sans-serif", max(10, int(11 * s))), padding=int(6 * s))
+            style.configure("TLabelframe", font=("sans-serif", max(11, int(12 * s)), "bold"))
+            style.configure("TLabelframe.Label", font=("sans-serif", max(11, int(12 * s)), "bold"))
+            style.configure("TSpinbox", font=("sans-serif", max(10, int(11 * s))))
+
+        def _p(self, val):
+            return int(val * self.scale)
+
+        def _f(self, size=11, bold=False):
+            weight = "bold" if bold else "normal"
+            return ("sans-serif", max(9, int(size * self.scale)), weight)
+
+        def create_ui(self):
+            p = self._p
+
+            frame_top = ttk.LabelFrame(self.root, text="输入", padding=p(12))
+            frame_top.pack(fill="x", padx=p(16), pady=(p(12), p(6)))
+
+            row_input = ttk.Frame(frame_top)
+            row_input.pack(fill="x")
+            ttk.Label(row_input, text="图片路径:", font=self._f(11)).pack(side="left")
+            ttk.Entry(
+                row_input, textvariable=self.input_path,
+                width=42, font=self._f(11)
+            ).pack(side="left", padx=p(8), fill="x", expand=True)
+            ttk.Button(row_input, text="选择目录", command=self.select_input_dir).pack(side="left", padx=p(4))
+            ttk.Button(row_input, text="选择文件", command=self.select_input_file).pack(side="left", padx=p(4))
+
+            frame_mid = ttk.LabelFrame(self.root, text="输出设置", padding=p(12))
+            frame_mid.pack(fill="x", padx=p(16), pady=p(6))
+
+            row1 = ttk.Frame(frame_mid)
+            row1.pack(fill="x")
+            ttk.Label(row1, text="输出目录:", font=self._f(11)).pack(side="left")
+            ttk.Entry(
+                row1, textvariable=self.output_dir,
+                width=42, font=self._f(11)
+            ).pack(side="left", padx=p(8))
+            ttk.Button(row1, text="选择...", command=self.select_output).pack(side="left")
+
+            row2 = ttk.Frame(frame_mid)
+            row2.pack(fill="x", pady=(p(10), 0))
+            ttk.Label(row2, text="输出尺寸 (mm):", font=self._f(11)).pack(side="left")
+            ttk.Spinbox(
+                row2, from_=10, to=200, textvariable=self.size_mm,
+                width=7, font=self._f(11)
+            ).pack(side="left", padx=p(8))
+            ttk.Label(row2, text="阈值:", font=self._f(11)).pack(side="left", padx=(p(12), 0))
+            ttk.Spinbox(
+                row2, from_=0, to=255, textvariable=self.threshold,
+                width=5, font=self._f(11)
+            ).pack(side="left", padx=p(4))
+            ttk.Button(row2, text="自动填充输出目录", command=self.auto_output).pack(side="left", padx=p(12))
+
+            frame_preview = ttk.LabelFrame(self.root, text="文件预览", padding=p(12))
+            frame_preview.pack(fill="both", expand=True, padx=p(16), pady=p(6))
+
+            list_height = max(6, int(10 * self.scale ** 0.4))
+            self.file_list = tk.Listbox(
+                frame_preview,
+                height=list_height,
+                font=("monospace", max(10, int(11 * self.scale)))
+            )
+            scrollbar = ttk.Scrollbar(frame_preview, orient="vertical", command=self.file_list.yview)
+            self.file_list.configure(yscrollcommand=scrollbar.set)
+            self.file_list.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            frame_bottom = ttk.Frame(self.root, padding=p(12))
+            frame_bottom.pack(fill="x", padx=p(16), pady=(p(6), p(12)))
+
+            self.btn_convert = ttk.Button(frame_bottom, text="开始转换", command=self.start_convert)
+            self.btn_convert.pack(side="left")
+
+            ttk.Button(frame_bottom, text="打开输出目录", command=self.open_output).pack(side="left", padx=p(14))
+
+            ttk.Label(frame_bottom, textvariable=self.status, font=self._f(10)).pack(side="right")
+
+            self.progress = ttk.Progressbar(self.root, mode="determinate")
+            self.progress.pack(fill="x", padx=p(16), pady=(0, p(12)))
+
+        def select_input_dir(self):
+            dlg = FileDialog(
+                self.root, title="选择图片目录", mode="dir",
+                initialdir=os.path.expanduser("~/Documents"), scale=self.scale
+            )
+            self.root.wait_window(dlg)
+            if dlg.result:
+                self.input_path.set(dlg.result)
+                self.is_single_file = False
+                if not self.output_dir.get():
+                    self.auto_output()
+                self.update_file_list()
+
+        def select_input_file(self):
+            filetypes = [
+                ("图片文件", " ".join(f"*{e}" for e in SUPPORTED_EXTS)),
+                ("PNG", "*.png"),
+                ("JPEG", "*.jpg *.jpeg"),
+            ]
+            dlg = FileDialog(
+                self.root, title="选择图片文件", mode="file",
+                filetypes=filetypes,
+                initialdir=os.path.expanduser("~/Documents"), scale=self.scale
+            )
+            self.root.wait_window(dlg)
+            if dlg.result:
+                self.input_path.set(dlg.result)
+                self.is_single_file = True
+                if not self.output_dir.get():
+                    self.auto_output()
+                self.update_file_list()
+
+        def select_output(self):
+            dlg = FileDialog(
+                self.root, title="选择输出目录", mode="dir",
+                initialdir=os.path.expanduser("~/Documents"), scale=self.scale
+            )
+            self.root.wait_window(dlg)
+            if dlg.result:
+                self.output_dir.set(dlg.result)
+
+        def auto_output(self):
+            inp = self.input_path.get()
+            if inp:
+                if self.is_single_file:
+                    self.output_dir.set(os.path.dirname(inp) + "_svg")
+                else:
+                    self.output_dir.set(inp.rstrip("/\\") + "_svg")
+
+        def update_file_list(self):
+            self.file_list.delete(0, "end")
+            path = self.input_path.get()
+            if not path:
+                return
+
+            exts = SUPPORTED_EXTS
+
+            if self.is_single_file:
+                if os.path.isfile(path):
+                    self.file_list.insert("end", os.path.basename(path))
+                    self.status.set("已选择 1 个文件")
+            else:
+                if os.path.isdir(path):
+                    files = sorted(
+                        f for f in glob.glob(os.path.join(path, "*"))
+                        if f.lower().endswith(exts)
+                    )
+                    for f in files:
+                        self.file_list.insert("end", os.path.basename(f))
+                    self.status.set(f"找到 {len(files)} 个图片文件")
+
+        def open_output(self):
+            d = self.output_dir.get()
+            if d and os.path.isdir(d):
+                if sys.platform == "win32":
+                    os.startfile(d)
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", d])
+                else:
+                    subprocess.run(["xdg-open", d])
+            else:
+                messagebox.showwarning("提示", "输出目录不存在")
+
+        def start_convert(self):
+            if not self.input_path.get():
+                messagebox.showwarning("提示", "请先选择输入路径")
+                return
+            if not self.output_dir.get():
+                self.auto_output()
+
+            output_dir = self.output_dir.get()
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except OSError as e:
+                messagebox.showerror("错误", f"无法创建输出目录:\n{output_dir}\n\n{e}")
+                return
+
+            self.btn_convert.config(state="disabled")
+            self.progress["value"] = 0
+            import threading
+            threading.Thread(target=self.do_convert, daemon=True).start()
+
+        def do_convert(self):
+            path = self.input_path.get()
+            output_dir = self.output_dir.get()
+            size_mm = self.size_mm.get()
+            threshold = self.threshold.get()
+
+            if self.is_single_file:
+                files = [path] if os.path.isfile(path) else []
+            else:
+                files = sorted(
+                    f for f in glob.glob(os.path.join(path, "*"))
+                    if f.lower().endswith(SUPPORTED_EXTS)
+                ) if os.path.isdir(path) else []
+
+            total = len(files)
+            if total == 0:
+                self.root.after(0, lambda: messagebox.showwarning("提示", "未找到支持的图片文件"))
+                self.root.after(0, lambda: self.btn_convert.config(state="normal"))
+                return
+
+            os.makedirs(output_dir, exist_ok=True)
+            ok = fail = 0
+
+            for idx, png in enumerate(files, 1):
+                name = os.path.splitext(os.path.basename(png))[0]
+                svg = os.path.join(output_dir, name + ".svg")
+                try:
+                    png_to_svg(png, svg, size_mm, threshold)
+                    ok += 1
+                    status_text = f"[{idx}/{total}] {name} ✓"
+                except Exception as e:
+                    fail += 1
+                    err_msg = str(e)
+                    if len(err_msg) > 80:
+                        err_msg = err_msg[:80] + "..."
+                    status_text = f"[{idx}/{total}] {name} ✗ {err_msg}"
+
+                progress_val = idx / total * 100
+                self.root.after(0, lambda s=status_text, p=progress_val: self.update_progress(s, p))
+
+            msg = f"完成！成功 {ok}，失败 {fail}\n输出: {output_dir}"
+            self.root.after(0, lambda: messagebox.showinfo("完成", msg))
+            self.root.after(0, lambda: self.btn_convert.config(state="normal"))
+
+        def update_progress(self, text, val):
+            self.status.set(text)
+            self.progress["value"] = val
+
+    root = tk.Tk()
+    EngraveSvgApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    missing = []
+    if not check_potrace():
+        missing.append("potrace")
+    if not check_pillow():
+        missing.append("python-pillow")
+
+    if missing:
+        print(f"错误: 缺少依赖: {', '.join(missing)}")
+        print("  Arch Linux: sudo pacman -S " + " ".join(
+            "potrace" if p == "potrace" else "python-pillow" for p in missing
+        ))
+        sys.exit(1)
+
+    if len(sys.argv) > 1:
+        main_cli()
+    else:
+        main_gui()
