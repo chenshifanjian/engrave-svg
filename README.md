@@ -113,6 +113,17 @@ yay -S engrave-svg
 3. 调用 potrace 描边生成 SVG 路径
 4. 设置输出尺寸为指定毫米值
 
+## 贡献者
+
+- [@chenshifanjian](https://github.com/chenshifanjian) — 作者
+
+## 致谢
+
+本项目基于以下开源项目：
+
+- [potrace](https://potrace.sourceforge.net/) — Peter Selinger 开发的位图描边引擎
+- [Pillow](https://python-pillow.org/) — Python Imaging Library 的维护分支
+
 ## 许可
 
 [MIT](LICENSE)
